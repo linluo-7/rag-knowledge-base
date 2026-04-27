@@ -3,84 +3,87 @@
 """
 
 from fastapi import APIRouter, HTTPException
-from app.schemas.models import GraphResponse, GraphData, GraphNode, GraphRelation
-from app.core.graph_store import Neo4jStore
+from fastapi.responses import JSONResponse
 
+from app.logging import get_logger
+from app.schemas import GraphData, EntityData, RelationData
+from app.factory import get_graph_store
+
+
+logger = get_logger(__name__)
 router = APIRouter()
 
 
-@router.get("/", response_model=GraphResponse)
+@router.get("/", response_model=GraphData)
 async def get_graph():
     """
     获取知识图谱的全部数据
-    
+
     返回所有节点和关系，用于前端可视化
     """
     try:
-        neo4j_store = Neo4jStore()
-        
-        nodes = neo4j_store.get_all_nodes()
-        relations = neo4j_store.get_all_relations()
-        
+        graph_store = get_graph_store()
+
+        nodes = graph_store.get_all_nodes()
+        relations = graph_store.get_all_relations()
+
         graph_nodes = [
-            GraphNode(
-                id=n["id"],
-                name=n["name"],
-                type=n["type"],
-                properties=n.get("properties", {})
+            EntityData(
+                id=n.id,
+                name=n.name,
+                type=n.type,
+                properties=n.properties,
             )
             for n in nodes
         ]
-        
+
         graph_relations = [
-            GraphRelation(
-                source=r["from"],
-                target=r["to"],
-                type=r["type"],
-                properties=r.get("properties", {})
+            RelationData(
+                from_node=r.from_node,
+                to_node=r.to_node,
+                type=r.type,
+                properties=r.properties,
             )
             for r in relations
         ]
-        
-        return GraphResponse(
-            data=GraphData(nodes=graph_nodes, relations=graph_relations),
-            total_nodes=len(graph_nodes),
-            total_relations=len(graph_relations)
-        )
-        
+
+        return GraphData(nodes=graph_nodes, links=graph_relations)
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"图谱查询失败: {e}")
+        logger.error(f"Graph query failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/search")
 async def search_graph(keyword: str):
     """
     搜索图谱中的节点
-    
+
     根据关键词搜索匹配的节点及其直接关联
     """
     try:
-        neo4j_store = Neo4jStore()
-        
-        matched_nodes = neo4j_store.search_nodes(keyword)
-        
+        graph_store = get_graph_store()
+
+        matched_nodes = graph_store.search_nodes(keyword)
+
         result_nodes = []
         result_relations = []
-        
+
         for node in matched_nodes:
-            node_detail = neo4j_store.get_node(node["name"])
+            node_detail = graph_store.get_node(node.name)
             if node_detail:
                 result_nodes.append(node_detail)
-            
-            node_relations = neo4j_store.get_node_relations(node["name"])
+
+            node_relations = graph_store.get_node_relations(node.name)
             result_relations.extend(node_relations)
-        
-        unique_nodes = {n["id"]: n for n in result_nodes}
-        
-        return {
+
+        unique_nodes = {n.id: n for n in result_nodes}
+
+        return JSONResponse({
             "nodes": list(unique_nodes.values()),
             "relations": result_relations
-        }
-        
+        })
+
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"图谱搜索失败: {e}")
+        logger.error(f"Graph search failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

@@ -3,52 +3,71 @@ Embedding 模块
 使用 BGE 模型生成文本向量
 """
 
-from typing import List, Dict, Any
+import threading
+from typing import List
+
 from sentence_transformers import SentenceTransformer
-from app.config import EMBEDDING_MODEL, EMBEDDING_DEVICE
+
+from app.config import get_settings
+from app.logging import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class EmbeddingModel:
-    """
-    BGE Embedding 模型封装
-    
-    使用 shibing624/text2vec-base-chinese 模型生成中文文本的向量表示。
-    """
-    
-    def __init__(self, model_name: str = EMBEDDING_MODEL, device: str = EMBEDDING_DEVICE):
-        self.model_name = model_name
-        self.device = device
-        print(f"正在加载 Embedding 模型: {model_name}...")
-        self.model = SentenceTransformer(model_name, device=device)
-        print(f"✅ Embedding 模型加载完成，设备: {device}")
-    
+    """BGE Embedding 模型封装（单例）"""
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self, model_name: str = None, device: str = None):
+        # 避免重复初始化
+        if hasattr(self, "_initialized") and self._initialized:
+            return
+        self._initialized = True
+
+        settings = get_settings()
+        self.model_name = model_name or settings.EMBEDDING_MODEL
+        self.device = device or settings.EMBEDDING_DEVICE
+
+        logger.info(f"Loading Embedding model: {self.model_name}...")
+        self.model = SentenceTransformer(self.model_name, device=self.device)
+        logger.info(f"Embedding model loaded, device: {self.device}")
+
     def embed_query(self, query: str) -> List[float]:
         """
         将单个查询文本转换为向量
-        
+
         Args:
             query: 查询文本
-            
+
         Returns:
             List[float]: 向量
         """
         embedding = self.model.encode(query, normalize_embeddings=True)
         return embedding.tolist()
-    
-    def embed_documents(self, documents: List[Dict[str, Any]]) -> List[List[float]]:
+
+    def embed_documents(self, documents: List[str]) -> List[List[float]]:
         """
         将多个文档文本转换为向量
-        
+
         Args:
-            documents: 文档列表，每个元素包含 "content" 字段
-            
+            documents: 文档列表
+
         Returns:
             List[List[float]]: 向量列表
         """
-        texts = [doc["content"] for doc in documents]
-        embeddings = self.model.encode(texts, normalize_embeddings=True)
+        embeddings = self.model.encode(documents, normalize_embeddings=True)
         return embeddings.tolist()
-    
+
     def get_dimension(self) -> int:
         """获取向量维度"""
         return self.model.get_sentence_embedding_dimension()
