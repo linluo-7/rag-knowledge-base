@@ -1,0 +1,91 @@
+# CI/CD 流水线
+
+> 自动化部署和测试
+
+---
+
+## GitHub Actions
+
+```yaml
+# .github/workflows/ci.yml
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install -r backend/requirements.txt
+          pip install pytest pytest-cov
+
+      - name: Run unit tests
+        run: pytest tests/test_unit.py -v
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v3
+        with:
+          files: ./coverage.xml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker
+        run: docker build -f docker/Dockerfile -t rag-api:${{ github.sha }} .
+
+      - name: Run container smoke test
+        run: |
+          docker run -d --name test-rag rag-api:${{ github.sha }}
+          sleep 10
+          curl http://localhost:5003/health
+          docker stop test-rag
+```
+
+---
+
+## 环境配置
+
+| 环境 | 触发 | 用途 |
+|------|------|------|
+| dev | PR | 开发测试 |
+| staging | main | 预发布 |
+| prod | tag | 生产发布 |
+
+---
+
+## 部署流程
+
+```bash
+# Staging 部署 (自动)
+git push origin main  # -> 构建 -> 测试 -> 部署到 staging
+
+# Prod 部署 (手动)
+git tag v2.1.0
+git push origin v2.1.0  # -> 构建 -> 验证 -> 部署到 prod
+```
+
+---
+
+## 回滚
+
+```bash
+# 回滚到上一个版本
+docker pull rag-api:previous-tag
+kubectl rollout restart deployment/rag-api
+```
