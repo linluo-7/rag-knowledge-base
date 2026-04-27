@@ -1,8 +1,10 @@
 """
-自定义异常类
+自定义异常类 - 生产级版本
 """
 
 from typing import Any, Optional
+
+from app.sanitize import sanitize_error
 
 
 class RAGException(Exception):
@@ -21,24 +23,25 @@ class RAGException(Exception):
         self.details = details or {}
         super().__init__(self.message)
 
-    def to_dict(self) -> dict:
-        return {
-            "error": {
-                "code": self.code,
-                "message": self.message,
-                "details": self.details,
-            }
-        }
+    def to_dict(self, include_trace: bool = False) -> dict:
+        """序列化异常"""
+        if include_trace:
+            data = sanitize_error(self, include_trace=True)
+        else:
+            data = {"code": self.code, "message": self.message}
+
+        if self.details:
+            # 脱敏 details
+            from app.sanitize import sanitize_dict
+            data["details"] = sanitize_dict(self.details)
+
+        return {"error": data}
 
 
 class DocumentParseError(RAGException):
     """文档解析异常"""
 
-    def __init__(
-        self,
-        message: str = "Failed to parse document",
-        details: Optional[dict] = None,
-    ):
+    def __init__(self, message: str = "Failed to parse document", details: Optional[dict] = None):
         super().__init__(
             message=message,
             code="DOCUMENT_PARSE_ERROR",
@@ -60,11 +63,7 @@ class UnsupportedFormatError(DocumentParseError):
 class VectorStoreError(RAGException):
     """向量存储异常"""
 
-    def __init__(
-        self,
-        message: str = "Vector store error",
-        details: Optional[dict] = None,
-    ):
+    def __init__(self, message: str = "Vector store error", details: Optional[dict] = None):
         super().__init__(
             message=message,
             code="VECTOR_STORE_ERROR",
@@ -86,11 +85,7 @@ class VectorStoreConnectionError(VectorStoreError):
 class GraphStoreError(RAGException):
     """图存储异常"""
 
-    def __init__(
-        self,
-        message: str = "Graph store error",
-        details: Optional[dict] = None,
-    ):
+    def __init__(self, message: str = "Graph store error", details: Optional[dict] = None):
         super().__init__(
             message=message,
             code="GRAPH_STORE_ERROR",
@@ -112,11 +107,7 @@ class GraphStoreConnectionError(GraphStoreError):
 class LLMError(RAGException):
     """LLM 调用异常"""
 
-    def __init__(
-        self,
-        message: str = "LLM call failed",
-        details: Optional[dict] = None,
-    ):
+    def __init__(self, message: str = "LLM call failed", details: Optional[dict] = None):
         super().__init__(
             message=message,
             code="LLM_ERROR",
@@ -148,11 +139,7 @@ class LLMQuotaError(LLMError):
 class EmbeddingError(RAGException):
     """Embedding 异常"""
 
-    def __init__(
-        self,
-        message: str = "Embedding failed",
-        details: Optional[dict] = None,
-    ):
+    def __init__(self, message: str = "Embedding failed", details: Optional[dict] = None):
         super().__init__(
             message=message,
             code="EMBEDDING_ERROR",
@@ -164,11 +151,7 @@ class EmbeddingError(RAGException):
 class AuthenticationError(RAGException):
     """认证异常"""
 
-    def __init__(
-        self,
-        message: str = "Authentication failed",
-        details: Optional[dict] = None,
-    ):
+    def __init__(self, message: str = "Authentication failed", details: Optional[dict] = None):
         super().__init__(
             message=message,
             code="AUTHENTICATION_ERROR",
@@ -186,7 +169,7 @@ class RateLimitError(RAGException):
         retry_after: Optional[int] = None,
         details: Optional[dict] = None,
     ):
-        details = details or {}
+        details = dict(details or {})
         if retry_after:
             details["retry_after"] = retry_after
         super().__init__(
@@ -200,11 +183,7 @@ class RateLimitError(RAGException):
 class ValidationError(RAGException):
     """验证异常"""
 
-    def __init__(
-        self,
-        message: str = "Validation failed",
-        details: Optional[dict] = None,
-    ):
+    def __init__(self, message: str = "Validation failed", details: Optional[dict] = None):
         super().__init__(
             message=message,
             code="VALIDATION_ERROR",
@@ -216,13 +195,8 @@ class ValidationError(RAGException):
 class ResourceNotFoundError(RAGException):
     """资源不存在"""
 
-    def __init__(
-        self,
-        resource: str,
-        resource_id: Any = None,
-        details: Optional[dict] = None,
-    ):
-        details = details or {}
+    def __init__(self, resource: str, resource_id: Any = None, details: Optional[dict] = None):
+        details = dict(details or {})
         if resource_id:
             details["resource_id"] = str(resource_id)
         super().__init__(
@@ -231,3 +205,27 @@ class ResourceNotFoundError(RAGException):
             status_code=404,
             details=details,
         )
+
+
+# ===== 异常工厂 =====
+
+
+class ExceptionFactory:
+    """异常工厂"""
+
+    @staticmethod
+    def from_exception(e: Exception, code_prefix: str = "ERROR") -> RAGException:
+        """从标准异常创建"""
+        message = str(e) or "Unknown error"
+        code = f"{code_prefix}_{type(e).__name__.upper()}"
+        return RAGException(message=message, code=code, details={"original": str(e)})
+
+    @staticmethod
+    def not_found(resource: str, resource_id: Any = None) -> ResourceNotFoundError:
+        """创建 404 异常"""
+        return ResourceNotFoundError(resource, resource_id)
+
+    @staticmethod
+    def validation(field: str, message: str) -> ValidationError:
+        """创建验证异常"""
+        return ValidationError(message, details={"field": field})
