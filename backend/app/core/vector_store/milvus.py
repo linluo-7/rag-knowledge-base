@@ -1,5 +1,6 @@
 """
-Milvus 向量存储实现 - 生产级版本
+Milvus 向量存储实现 - 生产级版本 v2
+长连接复用 + 正确的连接池管理
 """
 
 import asyncio
@@ -7,7 +8,6 @@ import threading
 from contextlib import asynccontextmanager, contextmanager
 from typing import Any, Dict, List, Optional
 
-import aiohttp
 from pymilvus import (
     connections,
     Collection,
@@ -20,7 +20,6 @@ from pymilvus import (
 from app.config import get_settings
 from app.exceptions import VectorStoreConnectionError, VectorStoreError
 from app.logging import get_logger
-from app.core.pool import PooledConnection
 from app.core.vector_store.base import VectorStore as BaseVectorStore
 from app.core.vector_store.base import SearchResult, VectorDocument
 
@@ -28,99 +27,150 @@ from app.core.vector_store.base import SearchResult, VectorDocument
 logger = get_logger(__name__)
 
 
-class MilvusConnectionPool:
-    """Milvus 连接池"""
+class MilvusConnection:
+    """Milvus 长连接 - 保持连接不释放
 
-    _pools: Dict[str, "MilvusConnectionPool"] = {}
-    _lock = threading.Lock()
+    特性：
+    - 复用连接，不反复创建/销毁
+    - 线程安全
+    - 健康检查，断线重连
+    """
 
-    def __init__(self, host: str, port: int, pool_size: int = 5):
+    def __init__(self, host: str, port: int, alias: str = "default"):
         self.host = host
         self.port = port
-        self.pool_size = pool_size
-        self._available: List[str] = []
-        self._in_use: set = set()
+        self.alias = alias
         self._lock = threading.Lock()
+        self._closed = False
+        self._healthy = False
 
-    def get_connection(self) -> str:
-        """获取连接"""
+    def connect(self) -> None:
+        """建立连接"""
         with self._lock:
-            if self._available:
-                alias = self._available.pop()
-                self._in_use.add(alias)
-                return alias
+            if self._closed:
+                raise RuntimeError("Connection closed")
 
-            # 创建新连接
-            alias = f"milvus_{threading.current_thread().ident}_{len(self._in_use)}"
-            connections.connect(alias=alias, host=self.host, port=self.port)
-            self._in_use.add(alias)
-            return alias
+            try:
+                # 检查是否已连接
+                connections.connect(
+                    alias=self.alias,
+                    host=self.host,
+                    port=self.port,
+                )
+                self._healthy = True
+                logger.info(f"Milvus connected: {self.alias} -> {self.host}:{self.port}")
+            except Exception as e:
+                logger.warning(f"Milvus connect failed: {e}")
+                self._healthy = False
+                raise VectorStoreConnectionError(
+                    details={"host": self.host, "port": self.port, "error": str(e)}
+                )
 
-    def release_connection(self, alias: str) -> None:
-        """释放连接"""
-        with self._lock:
-            if alias in self._in_use:
-                self._in_use.remove(alias)
-                if len(self._available) < self.pool_size:
-                    self._available.append(alias)
-                else:
-                    try:
-                        connections.disconnect(alias)
-                    except Exception:
-                        pass
+    def is_healthy(self) -> bool:
+        """检查连接健康"""
+        try:
+            # 简单查询验证连接
+            utility.has_collection("_health_check")
+            return True
+        except Exception:
+            self._healthy = False
+            return False
 
-    @classmethod
-    def get_pool(cls, host: str, port: int, pool_size: int = 5) -> "MilvusConnectionPool":
-        """获取连接池单例"""
-        key = f"{host}:{port}"
-        with cls._lock:
-            if key not in cls._pools:
-                cls._pools[key] = cls(host, port, pool_size)
-            return cls._pools[key]
-
-    @classmethod
-    def close_all(cls) -> None:
-        """关闭所有连接"""
-        with cls._lock:
-            for pool in cls._pools.values():
-                pool.close()
-            cls._pools.clear()
+    def ensure_healthy(self) -> None:
+        """确保连接健康，必要时重连"""
+        if not self._healthy or not self.is_healthy():
+            logger.warning("Milvus connection unhealthy, reconnecting...")
+            self.connect()
 
     def close(self) -> None:
-        """关闭连接池"""
+        """关闭连接"""
         with self._lock:
-            for alias in list(self._available) + list(self._in_use):
+            if not self._closed:
                 try:
-                    connections.disconnect(alias)
+                    connections.disconnect(self.alias)
                 except Exception:
                     pass
-            self._available.clear()
-            self._in_use.clear()
+                self._closed = True
+                self._healthy = False
+
+
+class MilvusConnectionPool:
+    """Milvus 连接池 - 管理多个长连接
+
+    和传统连接池不同：
+    - 这里是管理多个 Milvus Connection 对象
+    - 每个 Connection 保持长连接
+    - 实际场景 Milvus 一组连接够用，这里简化管理
+    """
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __init__(self):
+        self._connections: Dict[str, MilvusConnection] = {}
+        self._lock = threading.Lock()
+        self._current = 0
+
+    @classmethod
+    def get_instance(cls) -> "MilvusConnectionPool":
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+
+    def get_connection(self, host: str = None, port: int = None) -> MilvusConnection:
+        """获取连接（复用一个）"""
+        settings = get_settings()
+        host = host or settings.MILVUS_HOST
+        port = port or settings.MILVUS_PORT
+        key = f"{host}:{port}"
+
+        with self._lock:
+            if key not in self._connections:
+                conn = MilvusConnection(host, port, alias=f"rag_{key}")
+                conn.connect()
+                self._connections[key] = conn
+                logger.info(f"Created Milvus connection: {key}")
+            else:
+                conn = self._connections[key]
+                conn.ensure_healthy()
+
+            return conn
+
+    def close_all(self) -> None:
+        """关闭所有连接"""
+        with self._lock:
+            for conn in self._connections.values():
+                conn.close()
+            self._connections.clear()
+            logger.info("All Milvus connections closed")
 
 
 @contextmanager
-def use_milvus_connection(host: str = None, port: int = None):
-    """同步使用 Milvus 连接"""
-    settings = get_settings()
-    host = host or settings.MILVUS_HOST
-    port = port or settings.MILVUS_PORT
-    pool_size = settings.MILVUS_POOL_SIZE
+def use_milvus():
+    """获取 Milvus 连接（推荐用法）
 
-    pool = MilvusConnectionPool.get_pool(host, port, pool_size)
-    alias = pool.get_connection()
+    用法：
+        with use_milvus() as conn:
+            collection = Collection("documents", using=conn.alias)
+    """
+    pool = MilvusConnectionPool.get_instance()
+    conn = pool.get_connection()
     try:
-        yield alias
-    finally:
-        pool.release_connection(alias)
+        yield conn
+    except Exception:
+        conn.ensure_healthy()
+        raise
 
 
 class MilvusVectorStore(BaseVectorStore):
-    """Milvus 向量数据库实现 - 生产级
+    """Milvus 向量数据库 - 生产级 v2
 
-    特性���
-    - 连接池管理
-    - 线程安全
-    - 异步支持
+    改进：
+    - 长连接复用
+    - 连接池统一管理
+    - 健康检查 + 自动重连
     """
 
     _instance = None
@@ -143,130 +193,102 @@ class MilvusVectorStore(BaseVectorStore):
         self.port = port or settings.MILVUS_PORT
         self.collection_name = settings.MILVUS_COLLECTION
         self.dim = settings.MILVUS_DIM
-        self.pool_size = settings.MILVUS_POOL_SIZE
 
-        self._pool: Optional[MilvusConnectionPool] = None
-        self._connect()
-
-    def _connect(self) -> None:
-        """建立连接"""
-        try:
-            self._pool = MilvusConnectionPool.get_pool(
-                self.host, self.port, self.pool_size
-            )
-            # 测试连接
-            with use_milvus_connection(self.host, self.port) as alias:
-                pass
-            logger.info(f"Milvus connection pool: {self.host}:{self.port} (size={self.pool_size})")
-        except Exception as e:
-            logger.error(f"Milvus connection failed: {e}")
-            raise VectorStoreConnectionError(
-                details={"host": self.host, "port": self.port, "error": str(e)}
-            )
+        self._pool = MilvusConnectionPool.get_instance()
 
     def check_connection(self) -> bool:
-        """检查连接状态"""
+        """检查连接"""
         try:
-            with use_milvus_connection(self.host, self.port) as alias:
-                connections.connect(alias=f"check_{id(self)}", host=self.host, port=self.port)
-                connections.disconnect(f"check_{id(self)}")
-            return True
+            conn = self._pool.get_connection()
+            return conn.is_healthy()
         except Exception:
             return False
 
     def init_collection(self, force: bool = False) -> None:
         """初始化 Collection"""
-        with use_milvus_connection(self.host, self.port) as alias:
-            if utility.has_collection(self.collection_name):
-                if force:
-                    utility.drop_collection(self.collection_name)
-                    logger.warning(f"Dropped collection: {self.collection_name}")
-                else:
-                    self._collection = Collection(self.collection_name)
-                    self._collection.load()
-                    logger.info(f"Collection exists: {self.collection_name}")
-                    return
+        conn = self._pool.get_connection()
 
-            fields = [
-                FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-                FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
-                FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=self.dim),
-                FieldSchema(name="metadata", dtype=DataType.JSON),
-            ]
+        if utility.has_collection(self.collection_name):
+            if force:
+                utility.drop_collection(self.collection_name)
+                logger.warning(f"Dropped collection: {self.collection_name}")
+            else:
+                self._collection = Collection(self.collection_name)
+                self._collection.load()
+                logger.info(f"Collection exists: {self.collection_name}")
+                return
 
-            schema = CollectionSchema(fields=fields, description="RAG 文档向量存储")
-            self._collection = Collection(name=self.collection_name, schema=schema)
+        fields = [
+            FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+            FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
+            FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=self.dim),
+            FieldSchema(name="metadata", dtype=DataType.JSON),
+        ]
 
-            index_params = {
-                "index_type": "IVF_FLAT",
-                "metric_type": "COSINE",
-                "params": {"nlist": 128},
-            }
+        schema = CollectionSchema(fields=fields, description="RAG 文档向量存储")
+        self._collection = Collection(name=self.collection_name, schema=schema)
 
-            self._collection.create_index(field_name="vector", index_params=index_params)
-            self._collection.load()
-            logger.info(f"Collection created: {self.collection_name}")
+        index_params = {
+            "index_type": "IVF_FLAT",
+            "metric_type": "COSINE",
+            "params": {"nlist": 128},
+        }
+
+        self._collection.create_index(field_name="vector", index_params=index_params)
+        self._collection.load()
+        logger.info(f"Collection created: {self.collection_name}")
 
     def insert(self, documents: List[VectorDocument]) -> None:
-        """插入文档"""
+        """插入"""
         if not self._collection:
             self.init_collection()
 
-        with use_milvus_connection(self.host, self.port) as alias:
-            collection = Collection(self.collection_name)
-            contents = [doc.content for doc in documents]
-            vectors = [doc.vector for doc in documents]
-            metadata = [doc.metadata or {} for _ in documents]
+        conn = self._pool.get_connection()
+        collection = Collection(self.collection_name, using=conn.alias)
 
-            collection.insert({
-                "content": contents,
-                "vector": vectors,
-                "metadata": metadata,
-            })
-            collection.flush()
-            logger.info(f"Inserted {len(documents)} documents")
+        contents = [doc.content for doc in documents]
+        vectors = [doc.vector for doc in documents]
+        metadata = [doc.metadata or {} for _ in documents]
 
-    def search(
-        self, query_vector: List[float], top_k: int = 5
-    ) -> List[SearchResult]:
-        """向量检索"""
+        collection.insert({
+            "content": contents,
+            "vector": vectors,
+            "metadata": metadata,
+        })
+        collection.flush()
+        logger.info(f"Inserted {len(documents)} documents")
+
+    def search(self, query_vector: List[float], top_k: int = 5) -> List[SearchResult]:
+        """检索"""
         if not self._collection:
             self.init_collection()
 
-        with use_milvus_connection(self.host, self.port) as alias:
-            collection = Collection(self.collection_name)
-            search_params = {
-                "metric_type": "COSINE",
-                "params": {"nprobe": 10},
-            }
+        conn = self._pool.get_connection()
+        conn.ensure_healthy()  # 确保连接健康
 
-            results = collection.search(
-                data=[query_vector],
-                anns_field="vector",
-                param=search_params,
-                limit=top_k,
-                output_fields=["content", "metadata"],
-            )
+        collection = Collection(self.collection_name, using=conn.alias)
+        search_params = {
+            "metric_type": "COSINE",
+            "params": {"nprobe": 10},
+        }
 
-            formatted = []
-            for hits in results:
-                for hit in hits:
-                    formatted.append(SearchResult(
-                        content=hit.entity.get("content"),
-                        score=hit.score,
-                        metadata=hit.entity.get("metadata", {}),
-                    ))
-            return formatted
-
-    async def search_async(
-        self, query_vector: List[float], top_k: int = 5
-    ) -> List[SearchResult]:
-        """异步向量检索 - 实际调用"""
-        # Milvus Python SDK 本身是同步的，我们用 run_in_executor 包装
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self.search, query_vector, top_k
+        results = collection.search(
+            data=[query_vector],
+            anns_field="vector",
+            param=search_params,
+            limit=top_k,
+            output_fields=["content", "metadata"],
         )
+
+        formatted = []
+        for hits in results:
+            for hit in hits:
+                formatted.append(SearchResult(
+                    content=hit.entity.get("content"),
+                    score=hit.score,
+                    metadata=hit.entity.get("metadata", {}),
+                ))
+        return formatted
 
     def search_by_text(self, text: str, top_k: int = 5) -> List[SearchResult]:
         """文本检索"""
@@ -276,39 +298,39 @@ class MilvusVectorStore(BaseVectorStore):
         return self.search(query_vector, top_k)
 
     def get_all(self, limit: int = 1000) -> List[VectorDocument]:
-        """获取所有文档"""
+        """获取所有"""
         if not self._collection:
             self.init_collection()
 
-        with use_milvus_connection(self.host, self.port) as alias:
-            collection = Collection(self.collection_name)
-            results = collection.query(
-                expr="id >= 0",
-                output_fields=["content", "metadata"],
-                limit=limit,
+        conn = self._pool.get_connection()
+        collection = Collection(self.collection_name, using=conn.alias)
+
+        results = collection.query(
+            expr="id >= 0",
+            output_fields=["content", "metadata"],
+            limit=limit,
+        )
+        return [
+            VectorDocument(
+                content=r["content"],
+                vector=[],
+                metadata=r.get("metadata"),
             )
-            return [
-                VectorDocument(
-                    content=r["content"],
-                    vector=[],
-                    metadata=r.get("metadata"),
-                )
-                for r in results
-            ]
+            for r in results
+        ]
 
     def delete_by_file_id(self, file_id: str) -> None:
-        """删除数据"""
+        """删除"""
         if not self._collection:
             self.init_collection()
 
-        with use_milvus_connection(self.host, self.port) as alias:
-            collection = Collection(self.collection_name)
-            collection.delete(f'metadata["file_id"] == "{file_id}"')
-            collection.flush()
-            logger.info(f"Deleted file_id: {file_id}")
+        conn = self._pool.get_connection()
+        collection = Collection(self.collection_name, using=conn.alias)
+
+        collection.delete(f'metadata["file_id"] == "{file_id}"')
+        collection.flush()
+        logger.info(f"Deleted file_id: {file_id}")
 
     def close(self) -> None:
-        """关闭连接"""
-        if self._pool:
-            self._pool.close()
-            logger.info("Milvus pool closed")
+        """关闭（池由应用退出时统一关闭）"""
+        pass
