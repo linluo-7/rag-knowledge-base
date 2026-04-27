@@ -2,6 +2,10 @@
 
 > 基于 LangChain + Milvus + Neo4j 的 RAG 知识库问答系统，支持知识图谱构建与双轨检索融合
 
+## 版本
+
+**v2.0.0** - 工业级重构版本
+
 ## 功能特性
 
 - 📄 **文档上传解析** — 支持 Word (.docx)、纯文本 (.txt) 文档上传与内容提取
@@ -10,6 +14,8 @@
 - 💬 **智能问答** — 双轨检索（向量+图谱）+ RRF 融合 + LLM 生成答案
 - 📊 **图谱可视化** — ECharts 力导向图展示实体关系网络
 - 🐳 **一键部署** — Docker Compose 快速启动全部组件
+- 🔒 **认证限流** — API Key 认证 + 请求限流
+- 📈 **监控告警** — 健康检查 + 指标监控
 
 ## 技术架构
 
@@ -49,8 +55,7 @@ cd rag-knowledge-base
 ### 2. 配置环境变量
 
 ```bash
-cd backend
-cp .env.example .env
+cp backend/.env.example backend/.env
 # 编辑 .env，填入你的 MiniMax API Key
 ```
 
@@ -58,78 +63,105 @@ cp .env.example .env
 
 ```bash
 # 一键启动全部服务（推荐）
-docker compose up -d
+docker compose -f docker/docker-compose.prod.yml up -d
 
 # 或分步启动
-docker compose up -d milvus neo4j    # 数据库
-python -m uvicorn app.main:app --port 5003  # 后端
+docker compose -f docker/docker-compose.prod.yml up -d milvus neo4j redis
+cd backend
+python -m uvicorn app.main:app --port 5003
 ```
 
 ### 4. 访问系统
 
 - 前端界面：http://localhost:5004
 - 后端 API：http://localhost:5003
+- API 文档：http://localhost:5003/docs
 - Neo4j Browser：http://localhost:7474
 
 ## 项目结构
 
 ```
 rag-knowledge-base/
-├── backend/                    # FastAPI 后端
-│   ├── app/
-│   │   ├── api/             # API 路由
-│   │   │   ├── chat.py      # 问答接口
-│   │   │   ├── graph.py     # 图谱接口
-│   │   │   └── upload.py    # 上传接口
-│   │   ├── core/            # 核心模块
-│   │   │   ├── document.py  # 文档解析
-│   │   │   ├── chunker.py   # 文本分块
-│   │   │   ├── embedding.py # BGE Embedding
-│   │   │   ├── vector_store.py  # Milvus
-│   │   │   ├── graph_store.py   # Neo4j
-│   │   │   ├── fusion.py    # RRF 融合
-│   │   │   └── llm.py       # MiniMax LLM
-│   │   ├── schemas/          # Pydantic 模型
-│   │   └── main.py          # FastAPI 入口
-│   ├── requirements.txt
-│   └── Dockerfile
+├── app/                         # FastAPI 后端
+│   ├── main.py                  # FastAPI 入口
+│   ├── config.py                # 配置管理（Pydantic Settings）
+│   ├── factory.py              # 依赖注入工厂
+│   ├── exceptions.py           # 自定义异常
+│   ├── logging.py              # 日志配置
+│   │
+│   ├── core/                   # 基础设施层
+│   │   ├── vector_store/       # 向量存储（抽象接口 + Milvus 实现）
+│   │   ├── graph_store/        # 图存储（抽象接口 + Neo4j 实现）
+│   │   ├── llm/               # LLM（抽象接口 + MiniMax 实现）
+│   │   ├── embedding.py       # BGE Embedding
+│   │   ├── chunker.py         # 文本分块
+│   │   ├── document.py        # 文档解析
+│   │   ├── fusion.py          # RRF 融合
+│   │   └── cache.py          # Redis 缓存
+│   │
+│   ├── service/               # 业务层
+│   │   ├── rag_service.py    # RAG 服务
+│   │   └── document_service.py  # 文档服务
+│   │
+│   ├── api/                  # 入口层
+│   │   ├── chat.py          # 问答接口
+│   │   ├── upload.py        # 上传接口
+│   │   └── graph.py         # 图谱接口
+│   │
+│   └── schemas/             # 数据模型
+│       ├── request.py
+│       └── response.py
+│
 ├── frontend/                  # React 前端
-│   ├── src/
-│   │   ├── pages/           # 页面组件
-│   │   ├── components/      # 通用组件
-│   │   └── api/             # API 调用封装
-│   └── Dockerfile
-├── docs/                     # 开发文档（10篇）
-│   ├── 01-项目介绍.md
-│   ├── 07-后端开发.md
-│   └── 10-Docker部署.md
-└── docker-compose.yml        # 一键部署配置
+├── docker/                   # Docker 配置
+│   ├── Dockerfile
+│   └── docker-compose.prod.yml
+└── docs/                     # 开发文档
 ```
 
 ## API 接口
 
 | 接口 | 方法 | 说明 |
 |------|------|------|
-| `POST /api/upload/` | 上传文档 | 解析文档，存入向量库和图谱 |
-| `POST /api/chat/` | 问答 | 输入问题，返回答案和相关文档 |
-| `GET /api/graph/` | 获取图谱 | 返回所有实体和关系 |
-| `GET /api/graph/search` | 搜索图谱 | 按关键词搜索相关实体 |
+| `POST /api/v1/upload/` | 上传文档 | 解析文档，存入向量库和图谱 |
+| `POST /api/v1/chat/` | 问答 | 输入问题，返回答案和相关文档 |
+| `GET /api/v1/graph/` | 获取图谱 | 返回所有实体和关系 |
+| `GET /api/v1/graph/search` | 搜索图谱 | 按关键词搜索相关实体 |
 | `GET /health` | 健康检查 | 检查 Milvus 和 Neo4j 状态 |
 
-## 开发文档
+## 工业级特性
 
-详细的开发指南见 [`docs/`](docs/) 目录：
+### 代码质量
 
-- [01-项目介绍.md](docs/01-项目介绍.md) — 系统架构、数据流程
-- [02-环境检查.md](docs/02-环境检查.md) — Docker、Git 检查
-- [03-Milvus部署.md](docs/03-Milvus部署.md) — 向量数据库部署
-- [04-Neo4j安装.md](docs/04-Neo4j安装.md) — 图数据库安装
-- [05-Python环境.md](docs/05-Python环境.md) — Conda 环境配置
-- [06-项目初始化.md](docs/06-项目初始化.md) — 项目结构、API 路由
-- [07-后端开发.md](docs/07-后端开发.md) — 7个核心模块详解
-- [08-前端开发.md](docs/08-前端开发.md) — React 页面、ECharts 图谱
-- [09-前后端联调.md](docs/09-前后端联调.md) — 联调测试
-- [10-Docker部署.md](docs/10-Docker部署.md) — 一键部署
+- ✅ 配置中心化（Pydantic Settings）
+- ✅ 依赖注入工厂（单例模式）
+- ✅ 自定义异常体系
+- ✅ 结构化日志系统
+- ✅ 分层架构（API / Service / Core）
+
+### 核心模块
+
+- ✅ VectorStore 抽象接口 + Milvus 实现
+- ✅ GraphStore 抽象接口 + Neo4j 实现
+- ✅ LLM 抽象接口 + MiniMax 实现（支持 API Key 轮换）
+- ✅ Embedding 模型单例化
+- ✅ Redis 缓存层
+
+### 业务层
+
+- ✅ RAG 服务（异步 + 并行检索）
+- ✅ 文档服务（上传处理流水线）
+
+### 安全
+
+- ✅ API Key 认证
+- ✅ 请求限流
+
+### 部署
+
+- ✅ 生产级 Docker 配置
+- ✅ 多阶段构建
+- ✅ 资源限制
 
 ## 技术栈
 
@@ -141,13 +173,14 @@ rag-knowledge-base/
 | 图数据库 | Neo4j 5.19 |
 | Embedding | shibing624/text2vec-base-chinese |
 | LLM | MiniMax API (abab6.5s-chat) |
+| 缓存 | Redis 7 |
 | 部署 | Docker Compose + Nginx |
 
 ## 注意事项
 
 1. **API Key** — 需要配置 MiniMax API Key 才能使用问答功能
 2. **磁盘空间** — Docker 镜像较大，建议预留 20GB+ 空间
-3. **端口占用** — 确保以下端口未被占用：2379, 5003, 5004, 7474, 7687, 9000, 19530
+3. **端口占用** — 确保以下端口未被占用：2379, 5003, 5004, 7474, 7687, 9000, 19530, 6379
 
 ## License
 
