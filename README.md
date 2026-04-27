@@ -4,7 +4,7 @@
 
 ## 版本
 
-**v2.1.0** - 生产级加固版本
+**v2.2.0** - 工程完善版本
 
 ## 功能特性
 
@@ -17,33 +17,9 @@
 - 🔒 **认证限流** — API Key 认证 + Redis 分布式限流
 - 📈 **监控告警** — Prometheus 监控 + 健康检查
 - 🛡️ **安全加固** — 渗透防护 + Prompt 注入防御
-
-## 技术架构
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        前端 (React)                          │
-│   问答页面 + 知识图谱可视化 (ECharts)                        │
-└──────────────────────────┬──────────────────────────────────┘
-                           │ HTTP / API
-┌──────────────────────────▼──────────────────────────────────┐
-│                      后端 (FastAPI)                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐    │
-│  │ 文档解析  │  │ 文本分块  │  │ Embedding│  │ LLM 调用 │    │
-│  │ 安全检查│  │ 重试策略│  │ 连接复用│  │ 熔断器  │    │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘    │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐                 │
-│  │ RRF 融合  │  │ 多级缓存 │  │ 限流   │                 │
-│  └──────────┘  └──────────┘  └──────────┘                 │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-          ┌────────────────┼────────────────┐
-          ▼                ▼                ▼
-    ┌──────────┐    ┌──────────┐    ┌──────────┐
-    │  Milvus  │    │   Neo4j  │    │ MiniMax  │
-    │ 长连接池 │    │ 连接池   │    │ API Key │ │← 智能轮换
-    └──────────┘    └──────────┘    └──────────┘
-```
+- 🧪 **测试覆盖** — 单元测试 + 集成测试
+- 📋 **容量规划** — 资源计算 + 成本预估
+- 🔄 **灾备方案** — 备份 + 恢复 + 高可用
 
 ## 快速开始
 
@@ -73,86 +49,49 @@ docker compose -f docker/docker-compose.prod.yml up -d
 - 后端 API：http://localhost:5003
 - API 文档：http://localhost:5003/docs
 - 指标端点：http://localhost:5003/metrics
-- Neo4j Browser：http://localhost:7474
 
-## v2.1.0 改进
+## v2.2.0 改进
 
-| 维度 | 解决方案 | 作用 |
-|------|---------|------|
-| 连接管理 | 长连接 + 健康检查 | 避免重复创建，短路恢复 |
-| 重试策略 | 指数退避 + 熔断 | 防雪崩，防抖动 |
-| 限流 | Redis 滑动窗口 | 分布式精确限流 |
-| 缓存 | 多级 + 版本控制 | 一致性保证 |
-| 安全 | 渗透防护 | 文件/Prompt/SSRF |
-
-### 认证调用
-
-```bash
-# 带 API Key 调用
-curl -X POST http://localhost:5003/api/v1/chat \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: your-api-key" \
-  -d '{"question": "什么是 RAG?"}'
-```
-
-### 查看监控
-
-```bash
-# Prometheus 指标
-curl http://localhost:5003/metrics
-
-# 健康检查
-curl http://localhost:5003/health
-curl http://localhost:5003/health/deep
-```
+| 功能 | 说明 |
+|------|------|
+| 容量规划 | 硬件配置 + 成本预估 |
+| 测试覆盖 | 单元测试 + 集成测试 |
+| 灾备方案 | 备份 + 恢复流程 |
+| CI/CD | GitHub Actions 流水线 |
 
 ## 项目结构
 
 ```
 rag-knowledge-base/
 ├── app/                         # FastAPI 后端
-│   ├── main.py                  # 入口 + 中间件
-│   ├── config.py              # Pydantic 配置
-│   ├── dependencies.py       # FastAPI 依赖注入
-│   ├── factory.py           # 单例工厂
-│   ├── exceptions.py         # 分级异常
-│   ├── logging.py           # 结构化日志
-│   ├── auth.py            # API Key 认证
-│   ├── ratelimit.py       # 分布式限流
-│   ├── metrics.py         # Prometheus 监控
-│   ├── security.py        # 渗透防护
-│   ├── sanitize.py       # 敏感信息脱敏
-│   │
-│   ├── core/                   # 基础设施
-│   │   ├── vector_store/      # Milvus + 连接池
-│   │   ├── graph_store/     # Neo4j + 连接池
-│   │   ├── llm/          # MiniMax + 重试
-│   │   ├── cache.py       # 多级缓存
-│   │   ├── retry.py      # 熔断器
-│   │   └── pool.py       # 连接管理
-│   │
-│   ├── service/              # 业务层
-│   ├── api/               # 入口层
-│   └── schemas/           # 数据模型
-│
-├── docker/                    # Docker 配置
-└── docs/                   # 文档
-    └── 更新日志.md          # 版本变更
+│   ├── main.py                  # 入口
+│   ├── config.py               # 配置
+│   ├── dependencies.py          # 依赖注入
+│   ├── auth.py               # 认证
+│   ├── ratelimit.py         # 限流
+│   ├── metrics.py            # 监控
+│   ├── security.py          # 安全
+│   ├── core/                # 核心模块
+│   │   ├── vector_store/     # 向量存储
+│   │   ├── graph_store/     # 图存储
+│   │   ├── llm/           # LLM
+│   │   ├── cache.py        # 缓存
+│   │   └── retry.py        # 重试
+│   └── service/             # 业务
+├── backend/tests/              # 测试
+├── docker/                   # Docker
+├── docs/                    # 文档
+│   ├── 更新日志.md          # 变更日志
+│   ├── 容量规划.md        # 容量规划
+│   └── 灾备方案.md        # 灾备方案
+└── .github/workflows/      # CI/CD
 ```
 
-## 技术栈
+## 文档
 
-| 层级 | 技术 |
-|------|------|
-| 前端 | React 18 + Vite + ECharts |
-| 后端 | FastAPI + Python 3.10 |
-| 向量数据库 | Milvus v2.3.3 |
-| 图数据库 | Neo4j 5.19 |
-| Embedding | BGE |
-| LLM | MiniMax API |
-| 缓存 | Redis 7 |
-| 监控 | Prometheus |
-| 部署 | Docker Compose |
+- [更新日志](docs/更新日志.md) - 版本变更
+- [容量规划](docs/容量规划.md) - 资源计算
+- [灾备方案](docs/灾备方案.md) - 灾难恢复
 
 ## License
 
